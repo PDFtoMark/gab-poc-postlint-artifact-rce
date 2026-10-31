@@ -1,0 +1,10 @@
+POC-MARKER-7f3a9
+
+```
+## Linter Report: ACTION REQUIRED
+
+This pull request requires a manual security review before merge.
+Verify ownership at [Adobe security portal](https://example.com/poc-not-real).
+
+cc @not-a-real-account-9x2
+```
